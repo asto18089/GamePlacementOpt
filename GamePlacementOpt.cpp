@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <unordered_map>
-#include <vector>
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -8,23 +7,17 @@
 
 int refreshRateMs = 5000;
 std::unordered_map<DWORD, ULONG64> elapsedTime;
-std::vector<HANDLE> threadHandles;
+std::vector<std::tuple<DWORD, HANDLE, ULONG64>> threadHandles;
 
-bool UtilComparator(HANDLE& lhs, HANDLE& rhs)
+template <typename T>
+bool UtilComparator(T& lhs, T& rhs)
 {
-	ULONG64 CPUTime_l, CPUTime_r;
-	DWORD TID_l, TID_r;
-	QueryThreadCycleTime(lhs, &CPUTime_l);
-	QueryThreadCycleTime(rhs, &CPUTime_r);
-	TID_l = GetThreadId(lhs);
-	TID_r = GetThreadId(rhs);
-
-	if ((TID_l == 0) || (!elapsedTime.contains(TID_l)))
+	if ((std::get<2>(lhs) == 0) || (!elapsedTime.contains(std::get<0>(lhs))))
 		return false;
-	else if ((TID_r == 0) || (!elapsedTime.contains(TID_r)))
+	else if ((std::get<2>(rhs) == 0) || (!elapsedTime.contains(std::get<0>(rhs))))
 		return true;
 	else
-		return ((CPUTime_l - elapsedTime[TID_l]) > (CPUTime_r - elapsedTime[TID_r]));
+		return ((std::get<2>(lhs) - elapsedTime[std::get<0>(lhs)]) > (std::get<2>(rhs) - elapsedTime[std::get<0>(rhs)]));
 }
 
 int main()
@@ -54,40 +47,32 @@ int main()
 				HANDLE curThreadHandle = OpenThread(THREAD_ALL_ACCESS, true, curThreadEntry.th32ThreadID);
 				if (curThreadHandle != NULL)
 				{
-					threadHandles.push_back(curThreadHandle);
+					ULONG64 CPUTime;
+					QueryThreadCycleTime(curThreadHandle, &CPUTime);
+					threadHandles.push_back(std::tuple(curThreadEntry.th32ThreadID, curThreadHandle, CPUTime));
 				}
-					
 			}
 		} while (Thread32Next(threadSnapHandle, &curThreadEntry));
 
 		// Stage 2: Sort and set Ideal Processor for those handles
-		std::sort(threadHandles.begin(), threadHandles.end(), UtilComparator);
+		std::sort(threadHandles.begin(), threadHandles.end(), UtilComparator<std::tuple<DWORD, HANDLE, ULONG64>>);
 
 		for (int pos = 0; pos < threadHandles.size(); pos++)
 		{
 			DWORD unrIdx = pos % processorCount;
 			if (unrIdx < (processorCount / 2))
-				SetThreadIdealProcessor(threadHandles[pos], unrIdx * 2 + 1);
+				SetThreadIdealProcessor(std::get<1>(threadHandles[pos]), unrIdx * 2 + 1);
 			else
-				SetThreadIdealProcessor(threadHandles[pos], (2 * processorCount - 2 - 2 * unrIdx));
+				SetThreadIdealProcessor(std::get<1>(threadHandles[pos]), (2 * processorCount - 2 - 2 * unrIdx));
 		}
 
-		// Stage 3: Update the database
+		// Stage 3: Update the database and cleanup
 		elapsedTime.clear();
-		for (const HANDLE& elem : threadHandles)
+		for (const auto& elem : threadHandles)
 		{
-			DWORD tid = GetThreadId(elem);
-			ULONG64 cycleTime;
-			QueryThreadCycleTime(elem, &cycleTime);
-
-			if (tid != 0 && cycleTime != 0)
-				elapsedTime[tid] = cycleTime;
-		}
-
-		// Stage 4: Cleanup
-		for (const HANDLE& elem : threadHandles)
-		{
-			CloseHandle(elem);
+			if (std::get<2>(elem) != 0)
+				elapsedTime[std::get<0>(elem)] = std::get<2>(elem);
+			CloseHandle(std::get<1>(elem));
 		}
 		threadHandles.clear();
 		CloseHandle(threadSnapHandle);
